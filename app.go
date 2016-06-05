@@ -210,7 +210,7 @@ var (
 			}
 			Log.Error("%v", err)
 		}
-		if !c.Response().Committed() {
+		if !c.response.Committed() {
 			c.String(code, msg)
 		}
 	}
@@ -285,13 +285,14 @@ func (this *App) Debug() bool {
 	return this.debug
 }
 
-func (this *App) MemoryCacheEnable() bool {
-	return this.memoryCache != nil && this.memoryCache.Enable()
+// 获取文件缓存对象
+func (this *App) MemoryCache() *MemoryCache {
+	return this.memoryCache
 }
 
-func (this *App) SetMemoryCache(m *MemoryCache) {
-	m.SetEnable(!this.debug)
-	this.memoryCache = m
+// 判断文件缓存是否开启
+func (this *App) CanMemoryCache() bool {
+	return this.memoryCache != nil && this.memoryCache.Enable()
 }
 
 // 返回当前真实注册的路由列表
@@ -384,6 +385,12 @@ func (this *App) run(address, tlsCertfile, tlsKeyfile string, readTimeout, write
 	}
 }
 
+// 设置文件缓存
+func (this *App) setMemoryCache(m *MemoryCache) {
+	m.SetEnable(!this.debug)
+	this.memoryCache = m
+}
+
 func (this *App) setSessions(sessions *session.Manager) {
 	this.sessions = sessions
 }
@@ -445,7 +452,7 @@ func (this *App) group(prefix string, middleware ...MiddlewareFunc) (g *Group) {
 // provided root directory.
 func (this *App) static(prefix, root string, middleware ...MiddlewareFunc) {
 	this.addwithlog(false, GET, prefix+"/*filepath", func(c *Context) error {
-		return c.File(path.Join(root, c.P(0))) // Param `_`
+		return c.File(path.Join(root, c.PathParamByIndex(0)))
 	}, middleware...)
 	Log.Sys("| %-7s | %-30s | %v", GET, prefix+"/*filepath", root)
 }
@@ -475,12 +482,12 @@ func (this *App) match(methods []string, path string, handler HandlerFunc, middl
 func (this *App) webSocket(path string, handler HandlerFunc, middleware ...MiddlewareFunc) {
 	this.addwithlog(false, GET, path, HandlerFunc(func(c *Context) error {
 		websocket.Handler(func(ws *websocket.Conn) {
-			c.SetSocket(ws)
+			c.SetWs(ws)
 			err := handler(c)
 			if err != nil {
 				Log.Warn("WebSocket: [%v]%v", c.RealRemoteAddr(), err)
 			}
-		}).ServeHTTP(c.Response().Writer(), c.request)
+		}).ServeHTTP(c.response, c.request)
 		return nil
 	}), middleware...)
 	Log.Sys("| %-7s | %-30s | %v", WS, path, handlerName(handler))
@@ -549,7 +556,7 @@ func (this *App) newContext(resp *Response, req *http.Request) *Context {
 		request:  req,
 		response: resp,
 		pvalues:  nil,
-		pnames:   nil,
+		pkeys:    nil,
 		store:    make(store),
 	}
 }

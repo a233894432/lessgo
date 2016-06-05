@@ -95,7 +95,8 @@ func (r *Router) Handle(method, path string, handle HandlerFunc) {
 	root.addRoute(path, handle)
 }
 
-func (r *Router) allowed(path, reqMethod string, pnames, pvalues []string) (allow string) {
+func (r *Router) allowed(path, reqMethod string, pkeys, pvalues []string) string {
+	var allow string
 	if path == "*" { // server-wide
 		for method := range r.trees {
 			if method == OPTIONS {
@@ -116,7 +117,7 @@ func (r *Router) allowed(path, reqMethod string, pnames, pvalues []string) (allo
 				continue
 			}
 
-			handle, _, _, _ := r.trees[method].getValue(path, pnames, pvalues)
+			handle, _, _, _ := r.trees[method].getValue(path, pkeys, pvalues)
 			if handle != nil {
 				// add request method to list of allowed methods
 				if len(allow) == 0 {
@@ -130,21 +131,20 @@ func (r *Router) allowed(path, reqMethod string, pnames, pvalues []string) (allo
 	if len(allow) > 0 {
 		allow += ", OPTIONS"
 	}
-	return
+	return allow
 }
 
 // ServeHTTP makes the router implement the MiddlewareFunc.
 func (r *Router) process(next HandlerFunc) HandlerFunc {
-	return func(c *Context) (err error) {
+	return func(c *Context) error {
 		req := c.request
-		w := c.response
 		path := req.URL.Path
 		if root := r.trees[req.Method]; root != nil {
 			var handle HandlerFunc
 			var tsr bool
-			handle, c.pnames, c.pvalues, tsr = root.getValue(path, c.pnames, c.pvalues)
+			handle, c.pkeys, c.pvalues, tsr = root.getValue(path, c.pkeys, c.pvalues)
 			if handle != nil {
-				if err = handle(c); err != nil {
+				if err := handle(c); err != nil {
 					return err
 				}
 				return next(c)
@@ -184,8 +184,8 @@ func (r *Router) process(next HandlerFunc) HandlerFunc {
 		if req.Method == OPTIONS {
 			// Handle OPTIONS requests
 			if r.HandleOPTIONS {
-				if allow := r.allowed(path, req.Method, c.pnames, c.pvalues); len(allow) > 0 {
-					w.Header().Set("Allow", allow)
+				if allow := r.allowed(path, req.Method, c.pkeys, c.pvalues); len(allow) > 0 {
+					c.response.Header().Set("Allow", allow)
 					c.NoContent(200)
 					return next(c)
 				}
@@ -193,9 +193,9 @@ func (r *Router) process(next HandlerFunc) HandlerFunc {
 		} else {
 			// Handle 405
 			if r.HandleMethodNotAllowed {
-				if allow := r.allowed(path, req.Method, c.pnames, c.pvalues); len(allow) > 0 {
-					w.Header().Set("Allow", allow)
-					if err = r.MethodNotAllowed(c); err != nil {
+				if allow := r.allowed(path, req.Method, c.pkeys, c.pvalues); len(allow) > 0 {
+					c.response.Header().Set("Allow", allow)
+					if err := r.MethodNotAllowed(c); err != nil {
 						return err
 					}
 					return next(c)
@@ -204,7 +204,7 @@ func (r *Router) process(next HandlerFunc) HandlerFunc {
 		}
 
 		// Handle 404
-		if err = r.NotFound(c); err != nil {
+		if err := r.NotFound(c); err != nil {
 			return err
 		}
 		return next(c)

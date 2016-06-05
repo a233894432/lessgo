@@ -53,12 +53,8 @@ type Lessgo struct {
 
 const (
 	NAME    = "Lessgo"
-	VERSION = "0.6.0"
+	VERSION = "0.7.0"
 	ADDRESS = "https://github.com/lessgo/lessgo"
-)
-
-const (
-	MB = 1 << 20
 )
 
 var (
@@ -161,14 +157,24 @@ func SetDebug(on bool) {
 	app.SetDebug(on)
 }
 
-// 设置文件内存缓存功能(内部有默认实现)
-func SetMemoryCache(m *MemoryCache) {
-	app.SetMemoryCache(m)
+// 判断文件缓存是否开启
+func CanMemoryCache() bool {
+	return app.CanMemoryCache()
 }
 
-// 判断是否开启了文件内存缓存功能
-func MemoryCacheEnable() bool {
-	return app.MemoryCacheEnable()
+// 启用文件缓存
+func EnableMemoryCache() {
+	app.memoryCache.SetEnable(true)
+}
+
+// 关闭文件缓存
+func DisableMemoryCache() {
+	app.memoryCache.SetEnable(false)
+}
+
+// 主动刷新缓存文件
+func RefreshMemoryCache() {
+	app.memoryCache.TriggerScan()
 }
 
 // 获取已注册的操作列表
@@ -320,7 +326,7 @@ func ResetFiles() {
 // 创建静态目录服务的操作(用于在Root()下)
 func StaticFunc(root string) HandlerFunc {
 	return func(c *Context) error {
-		return c.File(path.Join(root, c.P(0)))
+		return c.File(path.Join(root, c.PathParamByIndex(0)))
 	}
 }
 

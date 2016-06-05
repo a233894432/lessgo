@@ -1,8 +1,7 @@
 package lessgo
 
 import (
-	"bytes"
-	"io"
+	"io/ioutil"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -10,12 +9,13 @@ import (
 )
 
 type MemoryCache struct {
-	usedSize        int64 // 已用容量
-	singleFileAllow int64 // 允许的最大文件
-	maxCap          int64 // 最大缓存总量
-	enable          *bool
-	gc              time.Duration // 缓存更新检查时长及动态过期时长
-	filemap         map[string]*Cachefile
+	usedSize        int64                 // 已用容量
+	singleFileAllow int64                 // 允许的最大文件
+	maxCap          int64                 // 最大缓存总量
+	enable          *bool                 // 是否启动缓存
+	gc              time.Duration         // 缓存更新检查时长及动态过期时长
+	filemap         map[string]*Cachefile // 已监控的文件缓存
+	trigger         chan struct{}         // 主动触发扫描本地文件
 	once            sync.Once
 	sync.RWMutex
 }
@@ -27,6 +27,7 @@ func NewMemoryCache(singleFileAllow, maxCap int64, gc time.Duration) *MemoryCach
 		gc:              gc,
 		enable:          new(bool),
 		filemap:         map[string]*Cachefile{},
+		trigger:         make(chan struct{}),
 	}
 }
 
@@ -50,7 +51,8 @@ func (m *MemoryCache) SetEnable(bl bool) {
 	}
 }
 
-func (m *MemoryCache) GetCacheFile(fname string) (*bytes.Reader, os.FileInfo, bool) {
+// 返回文件字节流、文件信息、文件是否存在
+func (m *MemoryCache) GetCacheFile(fname string) ([]byte, os.FileInfo, bool) {
 	m.RLock()
 	cfile, ok := m.filemap[fname]
 	if ok {
@@ -76,22 +78,34 @@ func (m *MemoryCache) GetCacheFile(fname string) (*bytes.Reader, os.FileInfo, bo
 	}
 	defer file.Close()
 	info, _ := file.Stat()
-	var bufferWriter bytes.Buffer
-	io.Copy(&bufferWriter, file)
+	buf, err := ioutil.ReadAll(file)
+	if err != nil {
+		return buf, info, true
+	}
 	// 检查是否加入缓存
 	if size := m.usedSize + info.Size(); size <= m.maxCap {
 		m.filemap[fname] = &Cachefile{
 			fname: fname,
-			bytes: bufferWriter.Bytes(),
+			bytes: buf,
 			info:  info,
 			exist: true,
 			time:  time.Now().Unix(),
 		}
 		atomic.StoreInt64(&m.usedSize, size)
 	}
-	return bytes.NewReader(bufferWriter.Bytes()), info, true
+	return buf, info, true
 }
 
+// 主动触发扫描本地文件
+func (m *MemoryCache) TriggerScan() {
+	defer func() {
+		// 当扫描刚刚已被触发时，trigger通道会被关闭重开，因此可能发生panic
+		recover()
+	}()
+	m.trigger <- struct{}{}
+}
+
+// 全局监控协程
 func (m *MemoryCache) memoryCacheMonitor() {
 	enable := m.enable
 	go m.once.Do(func() {
@@ -100,7 +114,19 @@ func (m *MemoryCache) memoryCacheMonitor() {
 			m.filemap = make(map[string]*Cachefile)
 		}()
 		for *enable {
-			time.Sleep(m.gc)
+			// 屏蔽上次扫描期间，主动触发的不必要的扫描请求
+			close(m.trigger)
+			m.trigger = make(chan struct{})
+
+			// 等待扫描本地文件
+			select {
+			case <-time.After(m.gc):
+			// 定时更新
+			case <-m.trigger:
+				// 主动触发更新
+			}
+
+			// 开始执行扫描
 			m.RLock()
 			for _, cfile := range m.filemap {
 				// 检查缓存超时，超时则加入过期列表
@@ -158,6 +184,7 @@ const (
 	_canupdate         // 文件被修改，可先删除后更新
 )
 
+// 扫描本地文件状态
 func (m *MemoryCache) check(c *Cachefile) int {
 	c.RLock()
 	defer c.RUnlock()
@@ -195,31 +222,37 @@ func (m *MemoryCache) check(c *Cachefile) int {
 	return _canupdate
 }
 
+// 更新缓存
 func (m *MemoryCache) update(c *Cachefile, preupdate bool) {
 	oldsize := c.size()
 	defer func() {
+		// 更新内存使用状态
 		atomic.AddInt64(&m.usedSize, c.size()-oldsize)
 	}()
+	// 不可预加载时清空文件缓存，并写锁定
 	if !preupdate {
-		// 不可预加载时清空文件缓存，并写锁定
 		c.Lock()
 		defer c.Unlock()
 		c.bytes = nil
 		c.info = nil
 	}
+	// 读取本地文件
 	file, err := os.Open(c.fname)
 	if err != nil {
 		return
 	}
 	defer file.Close()
 	info, _ := file.Stat()
-	var bufferWriter bytes.Buffer
-	io.Copy(&bufferWriter, file)
+	buf, err := ioutil.ReadAll(file)
+	if err != nil {
+		return
+	}
 	if preupdate {
 		c.Lock()
 		defer c.Unlock()
 	}
-	c.bytes = bufferWriter.Bytes()
+	// 写入缓存
+	c.bytes = buf
 	c.info = info
 	c.exist = true
 	c.time = time.Now().Unix()
@@ -237,33 +270,37 @@ func (m *MemoryCache) delete(c *Cachefile) {
 }
 
 type Cachefile struct {
-	fname string
-	info  os.FileInfo
-	bytes []byte
-	time  int64
-	exist bool
+	fname string      // 文件全名
+	info  os.FileInfo // 文件信息
+	bytes []byte      // 文件字节流
+	time  int64       // 最近一次访问或更新时间，用于gc回收
+	exist bool        // 文件在本地是否存在，避免每次扫描本地文件
 	sync.RWMutex
 }
 
+// 获取缓存的文件大小
 func (c *Cachefile) size() int64 {
 	c.RLock()
 	defer c.RUnlock()
 	return int64(len(c.bytes))
 }
 
-func (c *Cachefile) get() (*bytes.Reader, os.FileInfo, bool) {
+// 获取缓存文件的内容、信息、存在性
+func (c *Cachefile) get() ([]byte, os.FileInfo, bool) {
 	c.RLock()
 	defer c.RUnlock()
 	atomic.StoreInt64(&c.time, time.Now().Unix())
-	return bytes.NewReader(c.bytes), c.info, c.exist
+	return c.bytes, c.info, c.exist
 }
 
+// 获取最近一次访问或更新时间
 func (c *Cachefile) getTime() time.Time {
 	c.RLock()
 	defer c.RUnlock()
 	return time.Unix(c.time, 0)
 }
 
+// 获取文件存在状态
 func (c *Cachefile) getExist() bool {
 	c.RLock()
 	defer c.RUnlock()
