@@ -40,10 +40,7 @@ type (
 	store map[string]interface{}
 
 	// Common message format of JSON and JSONP.
-	CommJSON struct {
-		Code int         `json:"code"`
-		Info interface{} `json:"info,omitempty"`
-	}
+	CommJSON Result
 )
 
 var (
@@ -159,12 +156,20 @@ func (c *Context) SetPathParam(key, value string) {
 // 	}
 // }
 
-// QueryParams returns the query params.
-func (c *Context) QueryParams() url.Values {
+// QueryValues returns all query params.
+func (c *Context) QueryValues() url.Values {
 	if c.query == nil {
 		c.query = c.request.URL.Query()
 	}
 	return c.query
+}
+
+// QueryParams returns the query param with "[]string".
+func (c *Context) QueryParams(key string) []string {
+	if c.query == nil {
+		c.query = c.request.URL.Query()
+	}
+	return c.query[key]
 }
 
 // QueryParam returns the query param for the provided key.
@@ -201,9 +206,14 @@ func (c *Context) AddQueryParam(key string, value string) {
 // 	c.query.Del(key)
 // }
 
-// HeaderParams returns the request header.
-func (c *Context) HeaderParams() http.Header {
+// HeaderValues returns the request header.
+func (c *Context) HeaderValues() http.Header {
 	return c.request.Header
+}
+
+// HeaderParams returns request header value with "[]string" for the provided key.
+func (c *Context) HeaderParams(key string) []string {
+	return c.request.Header[key]
 }
 
 // HeaderParam returns request header value for the provided key.
@@ -227,15 +237,24 @@ func (c *Context) AddHeaderParam(key string, value string) {
 // 	c.request.Header.Del(key)
 // }
 
-// FormParams returns the form params as url.Values.
-func (c *Context) FormParams() url.Values {
-	if c.request.PostForm != nil {
-		return c.request.PostForm
-	}
-	if err := c.request.ParseForm(); err != nil {
-		Log.Error("%v", err)
+// FormValues returns the form params as url.Values.
+func (c *Context) FormValues() url.Values {
+	if c.request.PostForm == nil {
+		if err := c.request.ParseForm(); err != nil {
+			Log.Error("%v", err)
+		}
 	}
 	return c.request.PostForm
+}
+
+// FormParams returns the form field value with "[]string" for the provided key.
+func (c *Context) FormParams(key string) []string {
+	if c.request.PostForm == nil {
+		if err := c.request.ParseForm(); err != nil {
+			Log.Error("%v", err)
+		}
+	}
+	return c.request.PostForm[key]
 }
 
 // FormParam returns the form field value for the provided key.
@@ -632,7 +651,7 @@ func (c *Context) Markdown(file string, hasCatalog ...bool) error {
 			return ErrNotFound
 		}
 		if c.isModified(fi.Name(), fi.ModTime()) {
-			c.response.Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
+			c.WriteHeader(http.StatusOK)
 			return markdown.GithubMarkdown(b, c.response, catalog)
 		}
 		return c.NoContent(http.StatusNotModified)
@@ -657,7 +676,7 @@ func (c *Context) Markdown(file string, hasCatalog ...bool) error {
 		if err != nil {
 			return ErrNotFound
 		}
-		c.response.Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
+		c.WriteHeader(http.StatusOK)
 		return markdown.GithubMarkdown(buf, c.response, catalog)
 	}
 	return c.NoContent(http.StatusNotModified)
@@ -679,7 +698,7 @@ func (c *Context) Attachment(r io.ReadSeeker, name string) error {
 // and `Last-Modified` response headers.
 func (c *Context) ServeContent(content io.ReadSeeker, name string, modtime time.Time) error {
 	if c.isModified(name, modtime) {
-		c.response.Header().Set(HeaderContentType, ContentTypeByExtension(name))
+		c.WriteHeader(http.StatusOK)
 		_, err := io.Copy(c.response, content)
 		return err
 	}
@@ -691,7 +710,7 @@ func (c *Context) ServeContent(content io.ReadSeeker, name string, modtime time.
 // and `Last-Modified` response headers.
 func (c *Context) ServeContent2(content []byte, name string, modtime time.Time) error {
 	if c.isModified(name, modtime) {
-		c.response.Header().Set(HeaderContentType, ContentTypeByExtension(name))
+		c.WriteHeader(http.StatusOK)
 		_, err := c.response.Write(content)
 		return err
 	}
@@ -706,8 +725,8 @@ func (c *Context) isModified(name string, modtime time.Time) bool {
 		head.Del(HeaderContentLength)
 		return false
 	}
+	c.response.Header().Set(HeaderContentType, ContentTypeByExtension(name))
 	head.Set(HeaderLastModified, modtime.UTC().Format(http.TimeFormat))
-	c.WriteHeader(http.StatusOK)
 	return true
 }
 
@@ -870,7 +889,7 @@ func (c *Context) init(rw http.ResponseWriter, req *http.Request) error {
 }
 
 func (c *Context) free() {
-
+	c.freeSession()
 	c.socket = nil
 	c.store = nil
 	c.realRemoteAddr = ""
