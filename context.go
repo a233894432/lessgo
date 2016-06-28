@@ -10,10 +10,13 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lessgo/lessgo/logs"
@@ -41,6 +44,11 @@ type (
 
 	// Common message format of JSON and JSONP.
 	CommJSON Result
+
+	ReverseProxys struct {
+		list map[string]*httputil.ReverseProxy
+		sync.RWMutex
+	}
 )
 
 var (
@@ -51,6 +59,10 @@ var (
 
 	// 文件上传默认内存缓存大小，默认值是64MB。
 	MaxMemory int64 = 64 * MB
+
+	reverseProxys = &ReverseProxys{
+		list: map[string]*httputil.ReverseProxy{},
+	}
 )
 
 func (c *Context) Request() *http.Request {
@@ -743,6 +755,48 @@ func (c *Context) Redirect(code int, url string) error {
 	}
 	c.response.Header().Set(HeaderLocation, url)
 	c.WriteHeader(code)
+	return nil
+}
+
+// ReverseProxy routes URLs to the scheme, host, and base path provided in targetUrlBase.
+// If pathAppend is "true" and the targetUrlBase's path is "/base" and the incoming request was for "/dir",
+// the target request will be for /base/dir.
+func (c *Context) ReverseProxy(targetUrlBase string, pathAppend bool) error {
+	var rp *httputil.ReverseProxy
+	reverseProxys.RLock()
+	rp = reverseProxys.list[targetUrlBase]
+	reverseProxys.RUnlock()
+	if rp == nil {
+		reverseProxys.Lock()
+		rp = reverseProxys.list[targetUrlBase]
+		if rp == nil {
+			target, err := url.Parse(targetUrlBase)
+			if err != nil {
+				reverseProxys.Unlock()
+				return err
+			}
+			targetQuery := target.RawQuery
+			rp = &httputil.ReverseProxy{
+				Director: func(req *http.Request) {
+					req.Host = target.Host
+					req.URL.Scheme = target.Scheme
+					req.URL.Host = target.Host
+					req.URL.Path = path.Join(target.Path, req.URL.Path)
+					if targetQuery == "" || req.URL.RawQuery == "" {
+						req.URL.RawQuery = targetQuery + req.URL.RawQuery
+					} else {
+						req.URL.RawQuery = targetQuery + "&" + req.URL.RawQuery
+					}
+				},
+			}
+			reverseProxys.list[targetUrlBase] = rp
+		}
+		reverseProxys.Unlock()
+	}
+	if !pathAppend {
+		c.request.URL.Path = ""
+	}
+	rp.ServeHTTP(c, c.request)
 	return nil
 }
 
