@@ -148,6 +148,10 @@ func SetRenderer(r Renderer) {
 	app.SetRenderer(r)
 }
 
+func TemplateVariable(name string, fn interface{}) {
+	app.TemplateVariable(name, fn)
+}
+
 // 判断当前是否为调试模式
 func Debug() bool {
 	return app.Debug()
@@ -428,7 +432,7 @@ func WrapMiddlewareConfigs(middlewares []interface{}) ([]*MiddlewareConfig, erro
 	return ms, nil
 }
 
-// 重建底层真实路由
+// Reregister real router
 func ReregisterRouter(reasons ...string) {
 	if len(reasons) > 0 {
 		if len(reasons[0]) > 0 {
@@ -451,7 +455,6 @@ func ReregisterRouter(reasons ...string) {
 		return
 	}
 
-	// 检查路由操作执行前后，中间件配置的可用性
 	if err = isExistMiddlewares(lessgo.virtBefore...); err != nil {
 		return
 	}
@@ -469,27 +472,27 @@ func ReregisterRouter(reasons ...string) {
 		}
 	}
 
-	// 阻塞所有产生的请求
-	app.lock.Lock()
-	defer app.lock.Unlock()
+	// Server pause and clean router
+	app.resetRouterBegin()
+	defer app.resetRouterEnd()
 
-	// 从虚拟路由创建真实路由
-	app.cleanRouter()
+	// Build real router
 	app.beforeUse(getMiddlewareFuncs(lessgo.virtBefore)...)
 	app.afterUse(getMiddlewareFuncs(lessgo.virtAfter)...)
+
 	group := app.group(
 		lessgo.virtRouter.Prefix,
 		getMiddlewareFuncs(lessgo.virtRouter.Middlewares)...,
 	)
+
 	for _, child := range lessgo.virtRouter.Children {
 		child.route(group)
 	}
 
-	// 从单独的静态文件虚拟路由注册真实路由
 	for _, v := range lessgo.virtFiles {
 		v.route()
 	}
-	// 从单独的静态目录虚拟路由注册真实路由
+
 	for _, v := range lessgo.virtStatics {
 		v.route()
 	}

@@ -39,6 +39,7 @@ type (
 		renderer       Renderer
 		memoryCache    *MemoryCache
 		ctxPool        sync.Pool
+		serving        bool
 		lock           sync.RWMutex
 	}
 
@@ -67,6 +68,7 @@ type (
 	// Renderer is the interface that wraps the Render function.
 	Renderer interface {
 		Render(io.Writer, string, interface{}, *Context) error
+		TemplateVariable(name string, v interface{})
 	}
 )
 
@@ -253,7 +255,7 @@ func (this *App) SetPanicStackFunc(fn func(rcv interface{}) string) {
 	this.panicStackFunc = PanicStackFunc(fn)
 }
 
-// 设置失败状态默认的响应操作
+// set the default failuer handler.
 func (this *App) SetFailureHandler(fn func(c *Context, code int, errString string) error) {
 	this.failureHandler = FailureHandlerFunc(fn)
 }
@@ -266,6 +268,15 @@ func (this *App) SetBinder(b Binder) {
 // SetRenderer registers an HTML template renderer. It's invoked by `Context#Render()`.
 func (this *App) SetRenderer(r Renderer) {
 	this.renderer = r
+}
+
+// SetRenderer registers an HTML template renderer. It's invoked by `Context#Render()`.
+func (this *App) TemplateVariable(name string, fn interface{}) {
+	if this.renderer != nil {
+		this.renderer.TemplateVariable(name, fn)
+	} else {
+		Log.Error("[%s] %s", color.Red("TemplateVariable Error"), "接口renderer为nil")
+	}
 }
 
 // SetDebug enable/disable debug modthis.
@@ -315,13 +326,24 @@ func (this *App) RealRoutes() []Route {
 	return routes
 }
 
+// return the server status.
+func (this *App) IsClose() bool {
+	this.lock.RLock()
+	defer this.lock.RUnlock()
+	return this.serving == false
+}
+
+// set the server status.
+func (this *App) SetStatus(serving bool) {
+	this.lock.Lock()
+	this.serving = serving
+	this.lock.Unlock()
+}
+
 // ServeHTTP implements `http.Handler` interface, which serves HTTP requests.
 func (this *App) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	this.lock.RLock()
-	var (
-		err error
-		c   = this.ctxPool.Get().(*Context)
-	)
+	var c = this.ctxPool.Get().(*Context)
+	var err error
 
 	defer func() {
 		if rcv := recover(); rcv != nil {
@@ -338,11 +360,14 @@ func (this *App) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 		c.free()
 		this.ctxPool.Put(c)
-		this.lock.RUnlock()
 	}()
 
 	if err = c.init(rw, req); err != nil {
-		Log.Error("%s", err.Error())
+		return
+	}
+
+	if this.IsClose() {
+		err = this.failureHandler(c, 503, "Server is upgrading...")
 		return
 	}
 
@@ -353,6 +378,7 @@ func (this *App) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			err = this.failureHandler(c, 500, errString)
 		}
 		Log.Error("%s", errString)
+		return
 	}
 }
 
@@ -407,7 +433,7 @@ func (this *App) run(address, tlsCertfile, tlsKeyfile string, readTimeout, write
 	}
 }
 
-// 设置文件缓存
+// set files cache
 func (this *App) setMemoryCache(m *MemoryCache) {
 	m.SetEnable(!this.debug)
 	this.memoryCache = m
@@ -449,13 +475,21 @@ func (this *App) afterUse(middleware ...MiddlewareFunc) {
 	this.resetChain()
 }
 
-func (this *App) cleanRouter() {
+func (this *App) resetRouterBegin() {
+	app.SetStatus(false)
+	this.router.Lock()
 	this.router.trees = make(map[string]*node)
 	this.routes = make(map[string]Route)
 	this.chainNodes = []MiddlewareFunc{this.router.process}
 	this.routerIndex = 0
 	this.chainHandler = chainEndHandler
 }
+
+func (this *App) resetRouterEnd() {
+	this.router.Unlock()
+	app.SetStatus(true)
+}
+
 func (this *App) resetChain() {
 	this.chainHandler = chainEndHandler
 	for i := len(this.chainNodes) - 1; i >= 0; i-- {

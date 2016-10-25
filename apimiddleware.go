@@ -395,7 +395,7 @@ var RequestLogger = ApiMiddleware{
 				code = color.Cyan(n)
 			}
 
-			Log.Debug("%s | %s | %s | %s | %s | %d", c.RealRemoteAddr(), method, u, code, stop.Sub(start), c.response.Size())
+			Log.Debug("%s | %s | %s | %s | %s | %d", c.RealRemoteAddr(), method, code, u, stop.Sub(start), c.response.Size())
 			return nil
 		}
 	},
@@ -405,7 +405,9 @@ var CrossDomain = ApiMiddleware{
 	Name: "设置允许跨域",
 	Desc: "根据配置信息设置允许跨域",
 	Middleware: func(c *Context) error {
-		c.response.Header().Set("Access-Control-Allow-Origin", "*")
+		c.response.Header().Set("Access-Control-Allow-Credentials", "true")
+		c.response.Header().Set("Access-Control-Allow-Origin", c.HeaderParam("Origin"))
+		// c.response.Header().Set("Access-Control-Allow-Origin", "*")
 		return nil
 	},
 }.Reg()

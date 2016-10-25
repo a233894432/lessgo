@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"mime"
@@ -75,6 +76,18 @@ func (c *Context) SetRequestBody(reader io.Reader) {
 	c.request.Body = ioutil.NopCloser(reader)
 }
 
+func (c *Context) ResponseWriter() http.ResponseWriter {
+	return c
+}
+
+func (c *Context) Response() *Response {
+	return c.response
+}
+
+func (c *Context) SetResponse(resp *Response) {
+	c.response = resp
+}
+
 func (c *Context) IsTLS() bool {
 	return c.request.TLS != nil
 }
@@ -88,17 +101,17 @@ func (c *Context) Scheme() string {
 
 // 获取客户端真实IP
 func (c *Context) RealRemoteAddr() string {
-	if len(c.realRemoteAddr) == 0 {
-		c.realRemoteAddr = c.request.RemoteAddr
-		if ip := c.request.Header.Get(HeaderXRealIP); ip != "" {
-			c.realRemoteAddr = ip
-		} else if ip = c.request.Header.Get(HeaderXForwardedFor); ip != "" {
-			c.realRemoteAddr = ip
-		} else {
-			c.realRemoteAddr, _, _ = net.SplitHostPort(c.realRemoteAddr)
+	if len(c.realRemoteAddr) > 0 {
+		return c.realRemoteAddr
+	}
+	var ip string
+	if ip = c.request.Header.Get(HeaderXRealIP); len(ip) == 0 {
+		if ip = c.request.Header.Get(HeaderXForwardedFor); len(ip) == 0 {
+			ip, _, _ = net.SplitHostPort(c.request.RemoteAddr)
 		}
 	}
-	return c.realRemoteAddr
+	c.realRemoteAddr = ip
+	return ip
 }
 
 // Path returns the registered path for the handler.
@@ -316,7 +329,11 @@ func (c *Context) SaveFile(key string, cover bool, newfname ...string) (fileUrl 
 	}()
 	var fullname string
 	if len(newfname) > 0 {
-		fullname = filepath.Join(UPLOADS_DIR, strings.Replace(newfname[0], "?", fh.Filename, -1))
+		if strings.Contains(newfname[0], "?") {
+			fullname = filepath.Join(UPLOADS_DIR, strings.Replace(newfname[0], "?", fh.Filename, -1))
+		} else {
+			fullname = filepath.Join(UPLOADS_DIR, newfname[0]+filepath.Ext(fh.Filename))
+		}
 		p, _ := filepath.Split(fullname)
 		err = os.MkdirAll(p, 0777)
 		if err != nil {
@@ -325,10 +342,13 @@ func (c *Context) SaveFile(key string, cover bool, newfname ...string) (fileUrl 
 	} else {
 		fullname = filepath.Join(UPLOADS_DIR, fh.Filename)
 	}
-	if utils.FileExists(fullname) && !cover {
-		idx := strings.LastIndex(fullname, filepath.Ext(fullname))
-		fullname = fullname[:idx] + "(2)" + fullname[idx:]
+
+	idx := strings.LastIndex(fullname, filepath.Ext(fullname))
+	_fullname := fullname
+	for i := 2; utils.FileExists(_fullname) && !cover; i++ {
+		_fullname = fmt.Sprintf("%s(%d)%s", fullname[:idx], i, fullname[idx:])
 	}
+	fullname = _fullname
 
 	fileUrl = "/" + strings.Replace(fullname, `\`, `/`, -1)
 
@@ -364,18 +384,6 @@ func (c *Context) AddCookieParam(cookie *http.Cookie) {
 // does it based on Content-Type header.
 func (c *Context) Bind(container interface{}) error {
 	return app.binder.Bind(container, c)
-}
-
-func (c *Context) Response() *Response {
-	return c.response
-}
-
-func (c *Context) ResponseWriter() http.ResponseWriter {
-	return c.response
-}
-
-func (c *Context) SetResponse(resp *Response) {
-	c.response = resp
 }
 
 // Header returns the response header.
@@ -422,9 +430,7 @@ func (c *Context) DelCookie() {
 // Content-Type line, Write adds a Content-Type set to the result of passing
 // the initial 512 bytes of written data to DetectContentType.
 func (c *Context) Write(b []byte) (int, error) {
-	n, err := c.response.writer.Write(b)
-	c.response.size += int64(n)
-	return n, err
+	return c.response.writer.Write(b)
 }
 
 // WriteHeader sends an HTTP response header with status code.
@@ -612,7 +618,7 @@ func (c *Context) File(file string) error {
 		if !exist {
 			return c.Failure(404, nil)
 		}
-		return c.ServeContent2(b, fi.Name(), fi.ModTime())
+		return c.ServeContent(bytes.NewReader(b), fi.Name(), fi.ModTime())
 	}
 	f, err := os.Open(file)
 	if err != nil {
@@ -686,28 +692,12 @@ func (c *Context) Attachment(r io.ReadSeeker, name string) error {
 	return err
 }
 
-// ServeContent sends static content from `io.Reader` and handles caching
+// ServeContent sends static content from `io.ReadSeeker` and handles caching
 // via `If-Modified-Since` request header. It automatically sets `Content-Type`
 // and `Last-Modified` response headers.
 func (c *Context) ServeContent(content io.ReadSeeker, name string, modtime time.Time) error {
-	if c.isModified(name, modtime) {
-		c.WriteHeader(http.StatusOK)
-		_, err := io.Copy(c.response, content)
-		return err
-	}
-	return c.NoContent(http.StatusNotModified)
-}
-
-// ServeContent2 sends static content from `[]byte` and handles caching
-// via `If-Modified-Since` request header. It automatically sets `Content-Type`
-// and `Last-Modified` response headers.
-func (c *Context) ServeContent2(content []byte, name string, modtime time.Time) error {
-	if c.isModified(name, modtime) {
-		c.WriteHeader(http.StatusOK)
-		_, err := c.response.Write(content)
-		return err
-	}
-	return c.NoContent(http.StatusNotModified)
+	http.ServeContent(c.response, c.request, name, modtime, content)
+	return nil
 }
 
 func (c *Context) isModified(name string, modtime time.Time) bool {
