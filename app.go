@@ -2,6 +2,7 @@ package lessgo
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lessgo/lessgo/grace"
+	"github.com/facebookgo/grace/gracehttp"
 	"github.com/lessgo/lessgo/logs"
 	"github.com/lessgo/lessgo/logs/color"
 	"github.com/lessgo/lessgo/session"
@@ -41,6 +42,8 @@ type (
 		ctxPool        sync.Pool
 		serving        bool
 		lock           sync.RWMutex
+		// the graceful exit or restart callback function
+		graceExitCallback func() error
 	}
 
 	// Route contains a handler and information for matching against requests.
@@ -351,7 +354,20 @@ func (this *App) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			if !c.response.Committed() {
 				err = this.failureHandler(c, 500, errString)
 			}
-			Log.Error("[%s] %s", color.Red("PANIC RECOVER"), errString)
+			var code string
+			if runtime.GOOS == "linux" {
+				code = "500"
+			} else {
+				code = color.Red(500)
+			}
+			Log.Error("%15s | %7s | %s | %s | [%s]\n%s",
+				c.RealRemoteAddr(),
+				c.request.Method,
+				code,
+				c.request.URL.String(),
+				color.Red("PANIC"),
+				errString,
+			)
 		}
 
 		if err != nil {
@@ -382,54 +398,54 @@ func (this *App) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// Set the graceful exit or restart callback function.
+func (this *App) SetGraceExitFunc(fn func() error) {
+	this.graceExitCallback = fn
+}
+
 // Run starts the HTTP server.
-func (this *App) run(address, tlsCertfile, tlsKeyfile string, readTimeout, writeTimeout time.Duration, graceful bool) {
-	server := &http.Server{
-		Addr:         address,
-		Handler:      this,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: writeTimeout,
-	}
-
-	canHttps := tlsCertfile != "" && tlsKeyfile != ""
-
+func (this *App) run(address, tlsCertfile, tlsKeyfile string, readTimeout, writeTimeout int64) {
 	var err error
-	if !graceful {
-		if canHttps {
-			err = server.ListenAndServeTLS(tlsCertfile, tlsKeyfile)
-		} else {
-			err = server.ListenAndServe()
+	var endRunning = make(chan bool)
+	go func() {
+		defer func() {
+			endRunning <- true
+		}()
+		server := &http.Server{
+			Addr:         address,
+			Handler:      this,
+			ReadTimeout:  time.Duration(readTimeout),
+			WriteTimeout: time.Duration(writeTimeout),
+		}
+		if canTLS := tlsCertfile != "" && tlsKeyfile != ""; canTLS {
+			var cert tls.Certificate
+			cert, err = tls.LoadX509KeyPair(tlsCertfile, tlsKeyfile)
+			if err != nil {
+				err = fmt.Errorf("Grace-ListenAndServeTLS: %s %s %v", tlsCertfile, tlsKeyfile, err)
+				return
+			}
+			server.TLSConfig = &tls.Config{
+				Certificates:             []tls.Certificate{cert},
+				PreferServerCipherSuites: true,
+			}
+			if err = gracehttp.ServeWithTerminateFunc(this.graceExitCallback, server); err != nil {
+				err = fmt.Errorf("Grace-ListenAndServeTLS: %v, %d", err, os.Getpid())
+			}
+			return
 		}
 
-	} else {
-
-		endRunning := make(chan bool, 1)
-		graceServer := grace.NewServer(address, server, Log)
-		if canHttps {
-			go func() {
-				time.Sleep(20 * time.Microsecond)
-				if err = graceServer.ListenAndServeTLS(tlsCertfile, tlsKeyfile); err != nil {
-					err = fmt.Errorf("Grace-ListenAndServeTLS: %v, %d", err, os.Getpid())
-					time.Sleep(100 * time.Microsecond)
-					endRunning <- true
-				}
-			}()
-		} else {
-			go func() {
-				// graceServer.Network = "tcp4"
-				if err = graceServer.ListenAndServe(); err != nil {
-					err = fmt.Errorf("Grace-ListenAndServe: %v, %d", err, os.Getpid())
-					time.Sleep(100 * time.Microsecond)
-					endRunning <- true
-				}
-			}()
+		if err = gracehttp.ServeWithTerminateFunc(this.graceExitCallback, server); err != nil {
+			err = fmt.Errorf("Grace-ListenAndServe: %v, %d", err, os.Getpid())
 		}
-		<-endRunning
-	}
+	}()
+	<-endRunning
 
 	if err != nil {
-		Log.Fatal("%v", err)
-		select {}
+		if strings.Contains(err.Error(), "use of closed network connection") {
+			Log.Warn("%v", "stopped listening and serveing: %s", address)
+		} else {
+			Log.Fatal("%v", err)
+		}
 	}
 }
 
@@ -510,7 +526,7 @@ func (this *App) static(prefix, root string, middleware ...MiddlewareFunc) {
 	this.addwithlog(false, GET, prefix+"/*filepath", func(c *Context) error {
 		return c.File(path.Join(root, c.PathParamByIndex(0)))
 	}, middleware...)
-	Log.Sys("| %-7s | %-30s | %v", GET, prefix+"/*filepath", root)
+	Log.Sys("| %7s | %-30s | %v", GET, prefix+"/*filepath", root)
 }
 
 // file registers a new route with path to serve a static filthis.
@@ -518,7 +534,7 @@ func (this *App) file(path, file string, middleware ...MiddlewareFunc) {
 	this.addwithlog(false, GET, path, HandlerFunc(func(c *Context) error {
 		return c.File(file)
 	}), middleware...)
-	Log.Sys("| %-7s | %-30s | %v", GET, path, file)
+	Log.Sys("| %7s | %-30s | %v", GET, path, file)
 }
 
 // match registers a new route for multiple HTTP methods and path with matching
@@ -547,7 +563,7 @@ func (this *App) webSocket(path string, handler HandlerFunc, middleware ...Middl
 		}).ServeHTTP(c.response, c.request)
 		return nil
 	}), middleware...)
-	Log.Sys("| %-7s | %-30s | %v", WS, path, handlerName(handler))
+	Log.Sys("| %7s | %-30s | %v", WS, path, handlerName(handler))
 }
 
 func (this *App) add(method, path string, handler HandlerFunc, middleware ...MiddlewareFunc) {
@@ -571,7 +587,7 @@ func (this *App) addwithlog(logprint bool, method, path string, handler HandlerF
 	}
 
 	if logprint {
-		Log.Sys("| %-7s | %-30s | %v", method, path, name)
+		Log.Sys("| %7s | %-30s | %v", method, path, name)
 	}
 }
 

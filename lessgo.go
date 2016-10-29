@@ -14,7 +14,6 @@ import (
 	"path"
 	"runtime"
 	"sync"
-	"time"
 
 	_ "github.com/lessgo/lessgo/_fixture"
 	"github.com/lessgo/lessgo/logs"
@@ -499,7 +498,8 @@ func ReregisterRouter(reasons ...string) {
 }
 
 // 运行服务
-func Run() {
+// @param graceExitCallback设置优雅关闭或重启时的收尾函数
+func Run(graceExitCallback ...func() error) {
 	// 添加系统预设的路由操作前的中间件
 	registerBefore()
 
@@ -526,10 +526,9 @@ func Run() {
 		tlsCertfile string
 		tlsKeyfile  string
 		mode        string
-		graceful    string
 		protocol    = "HTTP"
 	)
-	if Config.Listen.EnableHTTPS {
+	if Config.Listen.EnableTLS {
 		protocol = "HTTPS"
 		tlsCertfile = Config.Listen.HTTPSCertFile
 		tlsKeyfile = Config.Listen.HTTPSKeyFile
@@ -539,21 +538,19 @@ func Run() {
 	} else {
 		mode = "release"
 	}
-	if Config.Listen.Graceful {
-		graceful = "(enable-graceful)"
-	} else {
-		graceful = "(disable-graceful)"
-	}
 
-	Log.Sys("> %s listening and serving %s on %v (%s-mode) %v", Config.AppName, protocol, Config.Listen.Address, mode, graceful)
+	Log.Sys("> %s listen and serve gracefully %s/HTTP2 on %v (%s-mode)", Config.AppName, protocol, Config.Listen.Address, mode)
+
+	if len(graceExitCallback) > 0 {
+		lessgo.App.SetGraceExitFunc(graceExitCallback[0])
+	}
 
 	// 启动服务
 	lessgo.App.run(
 		Config.Listen.Address,
 		tlsCertfile,
 		tlsKeyfile,
-		time.Duration(Config.Listen.ReadTimeout),
-		time.Duration(Config.Listen.WriteTimeout),
-		Config.Listen.Graceful,
+		Config.Listen.ReadTimeout,
+		Config.Listen.WriteTimeout,
 	)
 }
