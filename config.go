@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"strings"
 
-	confpkg "github.com/lessgo/lessgo/config"
-	"github.com/lessgo/lessgo/logs"
+	confpkg "github.com/henrylee2cn/lessgo/config"
+	"github.com/henrylee2cn/lessgo/logs"
 )
 
 type (
@@ -38,6 +38,7 @@ type (
 		ReadTimeout   int64
 		WriteTimeout  int64
 		EnableTLS     bool
+		TLSAddress    string
 		HTTPSKeyFile  string
 		HTTPSCertFile string
 	}
@@ -108,9 +109,9 @@ func newConfig() *config {
 			Description: "A simple, stable, efficient and flexible web framework.",
 			// Host:              "127.0.0.1:8080",
 			Email:             "henrylee_cn@foxmail.com",
-			TermsOfServiceUrl: "https://github.com/lessgo/lessgo",
+			TermsOfServiceUrl: "https://github.com/henrylee2cn/lessgo",
 			License:           "MIT",
-			LicenseUrl:        "https://github.com/lessgo/lessgo/raw/master/doc/LICENSE",
+			LicenseUrl:        "https://github.com/henrylee2cn/lessgo/raw/master/doc/LICENSE",
 		},
 		Debug:       true,
 		CrossDomain: false,
@@ -120,6 +121,7 @@ func newConfig() *config {
 			ReadTimeout:   0,
 			WriteTimeout:  0,
 			EnableTLS:     false,
+			TLSAddress:    "0.0.0.0:10443",
 			HTTPSCertFile: "",
 			HTTPSKeyFile:  "",
 		},

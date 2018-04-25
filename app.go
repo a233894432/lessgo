@@ -17,10 +17,10 @@ import (
 	"time"
 
 	"github.com/facebookgo/grace/gracehttp"
-	"github.com/lessgo/lessgo/logs"
-	"github.com/lessgo/lessgo/logs/color"
-	"github.com/lessgo/lessgo/session"
-	"github.com/lessgo/lessgo/websocket"
+	"github.com/henrylee2cn/lessgo/logs"
+	"github.com/henrylee2cn/lessgo/logs/color"
+	"github.com/henrylee2cn/lessgo/session"
+	"github.com/henrylee2cn/lessgo/websocket"
 )
 
 type (
@@ -396,20 +396,27 @@ func (this *App) SetGraceExitFunc(fn func() error) {
 }
 
 // Run starts the HTTP server.
-func (this *App) run(address, tlsCertfile, tlsKeyfile string, readTimeout, writeTimeout int64) {
+func (this *App) run(address, tlsAddress, tlsCertfile, tlsKeyfile string, readTimeout, writeTimeout int64) {
 	var err error
 	var endRunning = make(chan bool)
+	var mode string
+	if Config.Debug {
+		mode = "debug"
+	} else {
+		mode = "release"
+	}
 	go func() {
 		defer func() {
 			endRunning <- true
 		}()
-		server := &http.Server{
-			Addr:         address,
-			Handler:      this,
-			ReadTimeout:  time.Duration(readTimeout),
-			WriteTimeout: time.Duration(writeTimeout),
-		}
+		var servers []*http.Server
 		if canTLS := tlsCertfile != "" && tlsKeyfile != ""; canTLS {
+			server := &http.Server{
+				Addr:         tlsAddress,
+				Handler:      this,
+				ReadTimeout:  time.Duration(readTimeout),
+				WriteTimeout: time.Duration(writeTimeout),
+			}
 			var cert tls.Certificate
 			cert, err = tls.LoadX509KeyPair(tlsCertfile, tlsKeyfile)
 			if err != nil {
@@ -420,13 +427,18 @@ func (this *App) run(address, tlsCertfile, tlsKeyfile string, readTimeout, write
 				Certificates:             []tls.Certificate{cert},
 				PreferServerCipherSuites: true,
 			}
-			if err = gracehttp.ServeWithTerminateFunc(this.graceExitCallback, server); err != nil {
-				err = fmt.Errorf("Grace-ListenAndServeTLS: %v, %d", err, os.Getpid())
-			}
-			return
+			servers = append(servers, server)
+			Log.Sys("> %s listen and serve gracefully HTTPS/HTTP2 on %v (%s-mode)", Config.AppName, tlsAddress, mode)
 		}
-
-		if err = gracehttp.ServeWithTerminateFunc(this.graceExitCallback, server); err != nil {
+		server := &http.Server{
+			Addr:         address,
+			Handler:      this,
+			ReadTimeout:  time.Duration(readTimeout),
+			WriteTimeout: time.Duration(writeTimeout),
+		}
+		servers = append(servers, server)
+		Log.Sys("> %s listen and serve gracefully HTTP/HTTP2 on %v (%s-mode)", Config.AppName, address, mode)
+		if err = gracehttp.ServeWithTerminateFunc(this.graceExitCallback, servers...); err != nil {
 			err = fmt.Errorf("Grace-ListenAndServe: %v, %d", err, os.Getpid())
 		}
 	}()
